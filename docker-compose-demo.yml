@@ -1,0 +1,55 @@
+# LightRAG Demo: 仅数据库（PostgreSQL + Neo4j）
+# ──────────────────────────────────────────────────────────────
+# Docker 只负责启动两个数据库，前后端代码本地手动启动：
+#
+#   后端: PYTHONUTF8=1 uv run lightrag-server
+#   前端: cd lightrag_webui && pnpm dev
+#
+# 用法:
+#   docker compose -f docker-compose-demo.yml up -d
+#   浏览器打开 http://localhost:7474 查看 Neo4j 图谱
+#
+# 数据目录挂载到项目 ./data/ 下，方便查看和备份。
+
+services:
+  # ── PostgreSQL (pgvector): KV / 向量 / 文档状态 ──
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: demo-postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./docker/demo/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    environment:
+      POSTGRES_USER: "rag"
+      POSTGRES_PASSWORD: "rag123"
+      POSTGRES_DB: "rag"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 5s
+    restart: unless-stopped
+
+  # ── Neo4j: 知识图谱 + Web 管理界面 ──
+  neo4j:
+    image: neo4j:5-community
+    container_name: demo-neo4j
+    ports:
+      - "7474:7474"   # Neo4j Browser Web 管理界面
+      - "7687:7687"   # Bolt 协议
+    volumes:
+      - ./data/neo4j:/data
+      - ./data/neo4j-logs:/logs
+    environment:
+      NEO4J_AUTH: "neo4j/neo4j123"
+      NEO4J_PLUGINS: '["apoc"]'
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 60
+      start_period: 15s
+    restart: unless-stopped
