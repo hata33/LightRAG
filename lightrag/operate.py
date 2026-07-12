@@ -3908,6 +3908,12 @@ async def kg_query(
     )
 
     # Handle cache
+    # 练习3: ACL 白名单加入 cache key,防止不同 ACL 的查询命中同一缓存
+    acl_hash = (
+        sorted(query_param.acl_allowed_doc_ids)
+        if query_param.acl_allowed_doc_ids is not None
+        else None
+    )
     args_hash = compute_args_hash(
         query_param.mode,
         query,
@@ -3924,6 +3930,7 @@ async def kg_query(
         global_config.get("enable_content_headings", False),
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
+        str(acl_hash),  # 练习3: ACL 影响 cache key
     )
 
     cached_result = await handle_cache(
@@ -4281,6 +4288,13 @@ async def _get_vector_context(
         search_top_k = query_param.chunk_top_k or query_param.top_k
         cosine_threshold = chunks_vdb.cosine_better_than_threshold
 
+        # ── 练习3: ACL pre-filter ──
+        # 如果设了文档白名单,放大召回(top_k × 3),过滤后截断
+        # 避免过滤后结果数量不足
+        acl_doc_ids = query_param.acl_allowed_doc_ids
+        if acl_doc_ids is not None:
+            search_top_k = search_top_k * 3
+
         results = await chunks_vdb.query(
             query, top_k=search_top_k, query_embedding=query_embedding
         )
@@ -4289,6 +4303,19 @@ async def _get_vector_context(
                 f"Naive query: 0 chunks (chunk_top_k:{search_top_k} cosine:{cosine_threshold})"
             )
             return []
+
+        # ── 练习3: ACL 过滤 chunks ──
+        if acl_doc_ids is not None:
+            before = len(results)
+            results = [
+                r for r in results
+                if r.get("full_doc_id") in acl_doc_ids
+            ]
+            if before != len(results):
+                logger.info(
+                    f"[ACL] chunk pre-filter: {before} → {len(results)} "
+                    f"(filtered out {before - len(results)} unauthorized chunks)"
+                )
 
         valid_chunks = []
         for result in results:
@@ -4299,6 +4326,7 @@ async def _get_vector_context(
                     "file_path": result.get("file_path", "unknown_source"),
                     "source_type": "vector",  # Mark the source type
                     "chunk_id": result.get("id"),  # Add chunk_id for deduplication
+                    "full_doc_id": result.get("full_doc_id"),  # 练习3: 带出 doc_id 供下游使用
                 }
                 valid_chunks.append(chunk_with_metadata)
 
@@ -5141,6 +5169,36 @@ async def _build_query_context(
     return QueryContextResult(context=context, raw_data=raw_data)
 
 
+def _entity_has_allowed_doc(result: dict, allowed_doc_ids: set[str]) -> bool:
+    """
+    检查一个 entity/relation/chunk 结果是否引用了至少一个允许的文档(OR 语义)。
+
+    result 的 file_path 是 <SEP> 拼接的多个文件名(如 "report.txt<SEP>salary.txt")。
+    我们把每个文件名转成 doc_id(basename 去扩展名),检查是否在白名单内。
+
+    练习3 新增。
+    """
+    import os
+
+    file_path = result.get("file_path", "")
+    if not file_path:
+        return False
+
+    # file_path 可能是 <SEP> 拼接的多个路径
+    from lightrag.constants import GRAPH_FIELD_SEP
+
+    paths = file_path.split(GRAPH_FIELD_SEP)
+    for p in paths:
+        # file_path → doc_id:取 basename 去扩展名
+        basename = os.path.basename(p.strip())
+        if "." in basename:
+            basename = basename.rsplit(".", 1)[0]
+        if basename in allowed_doc_ids:
+            return True
+
+    return False
+
+
 async def _get_node_data(
     query: str,
     knowledge_graph_inst: BaseGraphStorage,
@@ -5152,9 +5210,29 @@ async def _get_node_data(
         f"Query nodes: {query} (top_k:{query_param.top_k}, cosine:{entities_vdb.cosine_better_than_threshold})"
     )
 
-    results = await entities_vdb.query(
-        query, top_k=query_param.top_k, query_embedding=query_embedding
-    )
+    # ── 练习3: ACL pre-filter for entities ──
+    # entity 的 file_path 是 <SEP> 拼接的多个文件名
+    # 只要有一个文件在白名单内,就保留该 entity(OR 语义)
+    acl_doc_ids = query_param.acl_allowed_doc_ids
+    if acl_doc_ids is not None:
+        # 放大召回,防止过滤后不足
+        results = await entities_vdb.query(
+            query, top_k=query_param.top_k * 3, query_embedding=query_embedding
+        )
+        before = len(results)
+        results = [
+            r for r in results
+            if _entity_has_allowed_doc(r, acl_doc_ids)
+        ]
+        if before != len(results):
+            logger.info(
+                f"[ACL] entity pre-filter: {before} → {len(results)} "
+                f"(filtered out {before - len(results)} unauthorized entities)"
+            )
+    else:
+        results = await entities_vdb.query(
+            query, top_k=query_param.top_k, query_embedding=query_embedding
+        )
 
     if not len(results):
         return [], []
@@ -5427,9 +5505,27 @@ async def _get_edge_data(
         f"Query edges: {keywords} (top_k:{query_param.top_k}, cosine:{relationships_vdb.cosine_better_than_threshold})"
     )
 
-    results = await relationships_vdb.query(
-        keywords, top_k=query_param.top_k, query_embedding=query_embedding
-    )
+    # ── 练习3: ACL pre-filter for relations ──
+    # relation 的 file_path 也是 <SEP> 拼接的多个文件名
+    acl_doc_ids = query_param.acl_allowed_doc_ids
+    if acl_doc_ids is not None:
+        results = await relationships_vdb.query(
+            keywords, top_k=query_param.top_k * 3, query_embedding=query_embedding
+        )
+        before = len(results)
+        results = [
+            r for r in results
+            if _entity_has_allowed_doc(r, acl_doc_ids)
+        ]
+        if before != len(results):
+            logger.info(
+                f"[ACL] relation pre-filter: {before} → {len(results)} "
+                f"(filtered out {before - len(results)} unauthorized relations)"
+            )
+    else:
+        results = await relationships_vdb.query(
+            keywords, top_k=query_param.top_k, query_embedding=query_embedding
+        )
 
     if not len(results):
         return [], []
@@ -5912,6 +6008,12 @@ async def naive_query(
         return QueryResult(content=prompt_content, raw_data=raw_data)
 
     # Handle cache
+    # 练习3: ACL 白名单加入 cache key(同类搜索修复,与 kg_query 保持一致)
+    acl_hash_naive = (
+        sorted(query_param.acl_allowed_doc_ids)
+        if query_param.acl_allowed_doc_ids is not None
+        else None
+    )
     args_hash = compute_args_hash(
         query_param.mode,
         query,
@@ -5926,6 +6028,7 @@ async def naive_query(
         global_config.get("enable_content_headings", False),
         "\n<llm_identity>\n",
         serialize_llm_cache_identity(llm_cache_identity),
+        str(acl_hash_naive),
     )
     cached_result = await handle_cache(
         hashing_kv, args_hash, user_query, query_param.mode, cache_type="query"

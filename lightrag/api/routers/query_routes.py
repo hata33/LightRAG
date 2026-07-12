@@ -108,6 +108,14 @@ class QueryRequest(BaseModel):
         description="If True, enables streaming output. Defaults to False for /query, True for /query/stream.",
     )
 
+    # 练习3: 文档级 ACL 白名单(通常由反向代理注入,客户端不应自行设置)
+    acl_allowed_doc_ids: Optional[list[str]] = Field(
+        default=None,
+        description="Document-level access control. If set, only retrieve content from these doc_ids. "
+        "Typically injected by a reverse proxy after JWT authentication. "
+        "Clients should NOT set this field directly (it would be a security risk).",
+    )
+
     @field_validator("query", mode="after")
     @classmethod
     def query_strip_after(cls, query: str) -> str:
@@ -134,6 +142,10 @@ class QueryRequest(BaseModel):
         request_data = self.model_dump(
             exclude_none=True, exclude={"query", "include_chunk_content"}
         )
+
+        # 练习3: list[str] → set[str] (QueryParam 需要 set 类型)
+        if "acl_allowed_doc_ids" in request_data:
+            request_data["acl_allowed_doc_ids"] = set(request_data["acl_allowed_doc_ids"])
 
         # Ensure `mode` and `stream` are set explicitly
         param = QueryParam(**request_data)

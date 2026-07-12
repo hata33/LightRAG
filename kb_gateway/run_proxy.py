@@ -39,9 +39,10 @@ def init_permission_engine():
     """
     engine = PermissionEngine()
 
-    # alice 对 finance_report 有 view 权限
+    # alice 对财务报告有权限(月报 + 年报)
     engine.grant_document_view("finance_report", "alice")
     engine.grant_document_view("finance_report", "alice", as_owner=True)
+    engine.grant_document_view("finance_report_2025", "alice")
 
     # 注意:alice 对 salary_table 没有任何授权 → 无法 view
 

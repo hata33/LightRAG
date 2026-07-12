@@ -8362,6 +8362,7 @@ SQL_TEMPLATES = {
     "relationships": """
                      SELECT source_id AS src_id,
                             target_id AS tgt_id,
+                            file_path,
                             EXTRACT(EPOCH FROM create_time)::BIGINT AS created_at
                      FROM {table_name}
                      WHERE workspace = $1
@@ -8371,6 +8372,7 @@ SQL_TEMPLATES = {
                      """,
     "entities": """
                 SELECT entity_name,
+                       file_path,
                        EXTRACT(EPOCH FROM create_time)::BIGINT AS created_at
                 FROM {table_name}
                 WHERE workspace = $1

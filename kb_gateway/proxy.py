@@ -322,19 +322,45 @@ async def _forward_with_acl(
     filter_fn=None,
 ) -> Response:
     """
-    转发并对响应做 ACL 过滤(用于 query 类接口)。
+    转发 query 请求,集成两层 ACL 防御:
+      层1 (pre-filter): 把 ACL 白名单注入请求体,后端检索时就排除越权文档
+      层2 (post-fetch): 后端返回后,再过滤 references/chunks(双保险)
 
-    流程:转发 → 拿 JSON → ACL 过滤 → 返回过滤后的 JSON
+    流程:
+      1. 查权限引擎,拿 user_id 的 allowed_doc_ids
+      2. 注入到请求体的 acl_allowed_doc_ids 字段
+      3. 转发给后端(后端 pre-filter 生效)
+      4. 拿到响应,post-fetch 过滤(双保险)
+      5. 返回
     """
     port = _resolve_backend_port(user_id)
     url = f"http://127.0.0.1:{port}{path}"
 
     fwd_headers = {}
     for key, value in request.headers.items():
-        if key.lower() not in _HOP_HEADERS and key.lower() != "authorization":
-            fwd_headers[key] = value
+        # 跳过 hop-by-hop、authorization、content-length
+        # content-length 要跳过:我们会改写 body(注入 ACL),长度会变
+        # 让 httpx 自己根据新 body 重算
+        if key.lower() in _HOP_HEADERS or key.lower() == "authorization":
+            continue
+        if key.lower() == "content-length":
+            continue
+        fwd_headers[key] = value
 
     body = await request.body()
+
+    # ── 层1: pre-filter —— 注入 ACL 白名单 ──
+    engine = get_engine()
+    allowed_doc_ids = engine.get_viewable_documents(user_id)
+    if allowed_doc_ids is not None:
+        try:
+            body_json = json.loads(body)
+            body_json["acl_allowed_doc_ids"] = list(allowed_doc_ids)
+            body = json.dumps(body_json, ensure_ascii=False).encode()
+            logger_info = f"[Proxy ACL] user={user_id} injected {len(allowed_doc_ids)} allowed doc_ids"
+            print(logger_info)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            pass  # 非 JSON body(如 multipart),跳过注入
 
     async with httpx.AsyncClient() as client:
         try:

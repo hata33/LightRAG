@@ -2262,6 +2262,7 @@ class LightRAG(_RoleLLMMixin, _StorageMigrationMixin, _PipelineMixin):
             conversation_history=param.conversation_history,
             user_prompt=param.user_prompt,
             enable_rerank=param.enable_rerank,
+            acl_allowed_doc_ids=param.acl_allowed_doc_ids,  # 练习3: 透传 ACL 白名单
         )
 
         query_result = None

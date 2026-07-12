@@ -156,6 +156,14 @@ class QueryParam:
     containing citation information for the retrieved content.
     """
 
+    # ── ACL: document-level access control (练习3 新增) ──
+    acl_allowed_doc_ids: set[str] | None = None
+    """If set, only retrieve content from these doc_ids.
+    None means no ACL filtering (all documents accessible).
+    Used by vector-layer pre-filter to exclude unauthorized documents at retrieval time,
+    so the LLM never sees their content in the first place.
+    """
+
 
 @dataclass
 class StorageNameSpace(ABC):
